@@ -35,7 +35,8 @@ class ApiGatewayV2IntegrationTest {
                 .body("apiId", notNullValue())
                 .body("name", equalTo("test-http-api"))
                 .body("protocolType", equalTo("HTTP"))
-                .body("apiEndpoint", notNullValue())
+                .body("apiEndpoint", matchesPattern(
+                        "^http://[a-z0-9-]+\\.execute-api\\.localhost\\.floci\\.io:4566$"))
                 // AWS defaults must be populated
                 .body("routeSelectionExpression", equalTo("${request.method} ${request.path}"))
                 .body("apiKeySelectionExpression", equalTo("$request.header.x-api-key"))

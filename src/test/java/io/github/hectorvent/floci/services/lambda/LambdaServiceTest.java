@@ -65,6 +65,61 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createAndUpdateFunctionFileSystemConfig() {
+        Map<String, Object> request = baseRequest("efs-function");
+        request.put("FileSystemConfigs", List.of(Map.of(
+                "Arn", "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                "LocalMountPath", "/mnt/shared")));
+
+        LambdaFunction created = service.createFunction(REGION, request);
+        assertEquals(1, created.getFileSystemConfigs().size());
+        assertEquals("arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                created.getFileSystemConfigs().get(0).getArn());
+        assertEquals("/mnt/shared", created.getFileSystemConfigs().get(0).getLocalMountPath());
+
+        LambdaFunction updated = service.updateFunctionConfiguration(REGION, "efs-function",
+                Map.of("FileSystemConfigs", List.of()));
+        assertTrue(updated.getFileSystemConfigs().isEmpty());
+    }
+
+    @Test
+    void createFunctionRejectsInvalidFileSystemMountPath() {
+        Map<String, Object> request = baseRequest("invalid-efs-function");
+        request.put("FileSystemConfigs", List.of(Map.of(
+                "Arn", "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                "LocalMountPath", "/tmp/shared")));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionRejectsInvalidFileSystemAccessPointArn() {
+        Map<String, Object> request = baseRequest("invalid-efs-arn-function");
+        request.put("FileSystemConfigs", List.of(Map.of(
+                "Arn", "arn:aws:elasticfilesystem:us-east-1:000000000000:file-system/fs-0123456789abcdef0",
+                "LocalMountPath", "/mnt/shared")));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+    }
+
+    @Test
+    void createFunctionAcceptsS3FilesAccessPointArn() {
+        Map<String, Object> request = baseRequest("s3-files-function");
+        String arn = "arn:aws:s3files:us-east-1:000000000000:"
+                + "file-system/fs-0123456789abcdef0/access-point/fsap-0123456789abcdef0";
+        request.put("FileSystemConfigs", List.of(Map.of(
+                "Arn", arn,
+                "LocalMountPath", "/mnt/shared")));
+
+        LambdaFunction created = service.createFunction(REGION, request);
+        assertEquals(arn, created.getFileSystemConfigs().getFirst().getArn());
+    }
+
+    @Test
     void createFunctionFailsWhenMissingFunctionName() {
         Map<String, Object> req = baseRequest("x");
         req.remove("FunctionName");

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
@@ -33,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -81,6 +83,10 @@ class ContainerLauncherTest {
         lenient().when(tls.enabled()).thenReturn(false);
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
+        // The large-code path resolves a code-volume completion marker under the storage persistent path.
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        lenient().when(config.storage()).thenReturn(storage);
+        lenient().when(storage.persistentPath()).thenReturn(tempDir.toString());
 
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
 
@@ -188,6 +194,31 @@ class ContainerLauncherTest {
         // The code is tar-copied straight into /var/task on the real container.
         assertTrue(capturedRemotePaths.contains("/var/task"),
                 "small code should be copied directly into /var/task");
+    }
+
+    @Test
+    void launchFunction_mountsConfiguredEfsVolume() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("efs-code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("efs-fn");
+        fn.setFunctionArn("arn:aws:lambda:us-east-1:000000000000:function:efs-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setFileSystemConfigs(List.of(new LambdaFileSystemConfig(
+                "arn:aws:elasticfilesystem:us-east-1:000000000000:access-point/fsap-0123456789abcdef0",
+                "/mnt/shared")));
+
+        launcher.launch(fn);
+
+        Mount mount = captureRealContainerSpec().mounts().stream()
+                .filter(candidate -> "/mnt/shared".equals(candidate.getTarget()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(MountType.VOLUME, mount.getType());
+        assertEquals("floci-efs-fsap-0123456789abcdef0", mount.getSource());
+        assertFalse(Boolean.TRUE.equals(mount.getReadOnly()));
     }
 
     @Test

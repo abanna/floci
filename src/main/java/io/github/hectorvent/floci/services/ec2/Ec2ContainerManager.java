@@ -35,6 +35,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -66,12 +68,23 @@ public class Ec2ContainerManager {
     private final EmulatorConfig config;
     private final Ec2MetadataServer metadataServer;
     private final Ec2PortForwardManager portForwardManager;
+    private final ConcurrentMap<String, LaunchControl> activeLaunches = new ConcurrentHashMap<>();
 
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ec2-container-launcher");
         t.setDaemon(true);
         return t;
     });
+
+    private static final class LaunchControl {
+        private volatile boolean cancelled;
+        private volatile boolean running;
+        private volatile boolean createAttempted;
+        private volatile String containerName;
+        private volatile String containerId;
+        private volatile String containerIp;
+        private volatile int sshHostPort;
+    }
 
     @Inject
     public Ec2ContainerManager(ContainerBuilder containerBuilder,
@@ -119,18 +132,30 @@ public class Ec2ContainerManager {
      *                 via socat sidecars once the container is running (empty for none)
      */
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region, Set<Integer> appPorts) {
+        String instanceId = instance.getInstanceId();
+        LaunchControl control = new LaunchControl();
+        if (activeLaunches.putIfAbsent(instanceId, control) != null) {
+            throw new IllegalStateException("EC2 instance " + instanceId + " already has an active launch");
+        }
         instance.setState(InstanceState.pending());
 
         executor.submit(() -> {
             try {
-                String instanceId = instance.getInstanceId();
                 String containerName = ContainerStorageHelper.resourceName(config, "ec2", null, instanceId);
+                control.containerName = containerName;
+                if (control.cancelled) {
+                    return;
+                }
 
                 // Allocate SSH host port
                 int sshHostPort = portAllocator.allocate(
                         config.services().ec2().sshPortRangeStart(),
                         config.services().ec2().sshPortRangeEnd());
+                control.sshHostPort = sshHostPort;
                 instance.setSshHostPort(sshHostPort);
+                if (control.cancelled) {
+                    return;
+                }
 
                 // IMDS endpoint that this container should use
                 String flociHost = dockerHostResolver.resolve();
@@ -164,8 +189,16 @@ public class Ec2ContainerManager {
                 ContainerSpec spec = specBuilder.build();
 
                 // Create container without starting it
+                if (control.cancelled) {
+                    return;
+                }
+                control.createAttempted = true;
                 String containerId = lifecycleManager.create(spec);
+                control.containerId = containerId;
                 instance.setDockerContainerId(containerId);
+                if (control.cancelled) {
+                    return;
+                }
 
                 // Start the container
                 lifecycleManager.startCreated(containerId, spec);
@@ -173,6 +206,9 @@ public class Ec2ContainerManager {
                 // Poll until Docker confirms the container is running
                 boolean running = false;
                 for (int i = 0; i < 30 && !running; i++) {
+                    if (control.cancelled) {
+                        return;
+                    }
                     running = lifecycleManager.isContainerRunning(containerId);
                     if (!running) {
                         Thread.sleep(500);
@@ -180,8 +216,11 @@ public class Ec2ContainerManager {
                 }
 
                 if (!running) {
-                    LOG.warnv("EC2 instance {0} container {1} did not reach running state", instanceId, containerId);
-                    instance.setState(InstanceState.terminated());
+                    LOG.warnv("EC2 instance {0} container {1} did not reach running state",
+                            instanceId, containerId);
+                    return;
+                }
+                if (control.cancelled) {
                     return;
                 }
 
@@ -191,6 +230,7 @@ public class Ec2ContainerManager {
                 // before link-local metadata validation and UserData run.
                 String containerIp = waitForContainerBridgeIp(containerId, instanceId);
                 if (containerIp != null && !containerIp.isBlank()) {
+                    control.containerIp = containerIp;
                     instance.setContainerBridgeIp(containerIp);
                     exposeReachablePrivateAddress(instance, containerIp);
                     metadataServer.registerContainer(containerIp, instanceId, instance);
@@ -198,24 +238,33 @@ public class Ec2ContainerManager {
                 else {
                     LOG.warnv("EC2 instance {0} container {1} did not receive a usable bridge IP for IMDS",
                             instanceId, containerId);
-                    instance.setState(InstanceState.terminated());
+                    return;
+                }
+                if (control.cancelled) {
                     return;
                 }
 
                 configureLinkLocalMetadataEndpoint(containerId, instanceId, flociHost, imdsPort);
 
-                // Set public-facing addresses
-                instance.setPublicIpAddress("127.0.0.1");
-                instance.setPublicDnsName("localhost");
+                synchronized (control) {
+                    if (control.cancelled) {
+                        return;
+                    }
 
-                instance.setState(InstanceState.running());
+                    // Set public-facing addresses
+                    instance.setPublicIpAddress("127.0.0.1");
+                    instance.setPublicDnsName("localhost");
+                    instance.setState(InstanceState.running());
+
+                    // Publish security-group TCP ingress ports on the host via socat sidecars.
+                    if (appPorts != null && !appPorts.isEmpty()) {
+                        portForwardManager.reconcile(instance, appPorts);
+                    }
+
+                    control.running = true;
+                }
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
                         instanceId, containerId, String.valueOf(sshHostPort));
-
-                // Publish security-group TCP ingress ports on the host via socat sidecars.
-                if (appPorts != null && !appPorts.isEmpty()) {
-                    portForwardManager.reconcile(instance, appPorts);
-                }
 
                 // Inject SSH public key
                 if (publicKey != null && !publicKey.isBlank()) {
@@ -231,10 +280,16 @@ public class Ec2ContainerManager {
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                instance.setState(InstanceState.terminated());
             } catch (Exception e) {
-                LOG.warnv("Failed to launch EC2 instance {0}: {1}", instance.getInstanceId(), e.getMessage());
-                instance.setState(InstanceState.terminated());
+                LOG.warnv("Failed to launch EC2 instance {0}: {1}",
+                        instance.getInstanceId(), e.getMessage());
+            } finally {
+                if (!control.running) {
+                    cleanupLaunchResources(instance, control);
+                    instance.setState(InstanceState.terminated());
+                    instance.setTerminatedAt(System.currentTimeMillis());
+                }
+                activeLaunches.remove(instanceId, control);
             }
         });
     }
@@ -378,34 +433,65 @@ public class Ec2ContainerManager {
      * Sets terminatedAt for TTL pruning.
      */
     public void terminate(Instance instance) {
-        String containerId = instance.getDockerContainerId();
-        String containerIp = instance.getContainerBridgeIp();
-        int sshHostPort = instance.getSshHostPort();
-        instance.setState(InstanceState.shuttingDown());
+        LaunchControl control = activeLaunches.get(instance.getInstanceId());
+        if (control != null) {
+            synchronized (control) {
+                control.cancelled = true;
+                instance.setState(InstanceState.shuttingDown());
+                if (!control.running) {
+                    return;
+                }
+            }
+        } else {
+            instance.setState(InstanceState.shuttingDown());
+        }
         executor.submit(() -> {
-            portForwardManager.unpublishAll(instance);
-            if (containerId != null) {
-                try {
-                    dockerClient.removeContainerCmd(containerId).withForce(true).exec();
-                } catch (NotFoundException e) {
-                    // already gone
-                } catch (Exception e) {
-                    LOG.warnv("Error removing EC2 container {0}: {1}", containerId, e.getMessage());
-                }
-                try {
-                    // iptables/veth teardown lags behind container removal; prevents port-reuse conflicts.
-                    Thread.sleep(500);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-            if (sshHostPort > 0) {
-                portAllocator.release(sshHostPort);
-            }
-            metadataServer.unregisterContainer(containerIp, instance);
+            cleanupInstanceResources(
+                    instance,
+                    instance.getDockerContainerId(),
+                    instance.getContainerBridgeIp(),
+                    instance.getSshHostPort());
             instance.setState(InstanceState.terminated());
             instance.setTerminatedAt(System.currentTimeMillis());
         });
+    }
+
+    private void cleanupLaunchResources(Instance instance, LaunchControl control) {
+        String containerId = control.containerId;
+        if (containerId == null && control.createAttempted) {
+            containerId = control.containerName;
+        }
+        cleanupInstanceResources(
+                instance, containerId, control.containerIp, control.sshHostPort);
+    }
+
+    private void cleanupInstanceResources(
+            Instance instance, String containerId, String containerIp, int sshHostPort) {
+        try {
+            portForwardManager.unpublishAll(instance);
+        } catch (Exception e) {
+            LOG.warnv("Error removing EC2 port forwards for instance {0}: {1}",
+                    instance.getInstanceId(), e.getMessage());
+        }
+        if (containerId != null) {
+            try {
+                dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            } catch (NotFoundException e) {
+                LOG.debugv("EC2 container {0} was already absent during cleanup", containerId);
+            } catch (Exception e) {
+                LOG.warnv("Error removing EC2 container {0}: {1}", containerId, e.getMessage());
+            }
+            try {
+                // iptables/veth teardown lags behind container removal; prevents port-reuse conflicts.
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (sshHostPort > 0) {
+            portAllocator.release(sshHostPort);
+        }
+        metadataServer.unregisterContainer(containerIp, instance);
     }
 
     /**

@@ -42,6 +42,7 @@ class EcrRegistryManagerTest {
     private ContainerDetector containerDetector;
     private CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private EmulatorConfig.DockerConfig docker;
+    private EmulatorConfig.EcrServiceConfig ecr;
     private EcrRegistryManager manager;
 
     @BeforeEach
@@ -63,7 +64,7 @@ class EcrRegistryManagerTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        EmulatorConfig.EcrServiceConfig ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
+        ecr = Mockito.mock(EmulatorConfig.EcrServiceConfig.class);
         docker = Mockito.mock(EmulatorConfig.DockerConfig.class);
         EmulatorConfig.StorageConfig storage = Mockito.mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(Mockito.mock(EmulatorConfig.ServicesConfig.class));
@@ -109,6 +110,13 @@ class EcrRegistryManagerTest {
     }
 
     @Test
+    void proxyEndpoint_usesConfiguredContainerReachableEndpoint() {
+        when(ecr.proxyEndpoint()).thenReturn(Optional.of(" http://host.docker.internal:5100/ "));
+
+        assertEquals("http://host.docker.internal:5100", manager.getProxyEndpoint());
+    }
+
+    @Test
     void adoptUsesPublishedHostPortEvenWhenRunningInsideDocker() {
         // Regression: in container mode adopt()'s endpoint resolves to the registry's
         // internal port (5000); the advertised proxy endpoint must use the published
@@ -148,4 +156,5 @@ class EcrRegistryManagerTest {
 
         assertEquals("http://floci-run-one-test-ecr-registry:5000", manager.httpClient().baseUrl());
     }
+
 }

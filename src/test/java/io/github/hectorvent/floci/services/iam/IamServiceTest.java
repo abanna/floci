@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -278,11 +279,40 @@ class IamServiceTest {
     }
 
     @Test
+    void policyVersionIdsRemainMonotonicAfterDeletingAnOlderVersion() {
+        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        String arn = policy.getArn();
+        for (int i = 2; i <= 5; i++) {
+            iamService.createPolicyVersion(arn, "{\"v\":" + i + "}", false);
+        }
+        iamService.deletePolicyVersion(arn, "v3");
+
+        PolicyVersion next = iamService.createPolicyVersion(arn, "{\"v\":6}", false);
+
+        assertEquals("v6", next.getVersionId());
+        assertEquals(
+                Set.of("v1", "v2", "v4", "v5", "v6"),
+                iamService.listPolicyVersions(arn).stream()
+                        .map(PolicyVersion::getVersionId)
+                        .collect(java.util.stream.Collectors.toSet()));
+    }
+
+    @Test
     void deletePolicyWithAttachmentsFails() {
         iamService.createUser("alice", "/");
         IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
         iamService.attachUserPolicy("alice", policy.getArn());
         assertThrows(AwsException.class, () -> iamService.deletePolicy(policy.getArn()));
+    }
+
+    @Test
+    void deletePolicyUsesLiveEntitiesWhenStoredAttachmentCountIsStale() {
+        IamPolicy policy = iamService.createPolicy("P", "/", null, "{}", null);
+        policy.setAttachmentCount(1);
+
+        iamService.deletePolicy(policy.getArn());
+
+        assertThrows(AwsException.class, () -> iamService.getPolicy(policy.getArn()));
     }
 
     @Test
@@ -611,6 +641,11 @@ class IamServiceTest {
                 "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole");
         assertEquals("AmazonRDSEnhancedMonitoringRole", rdsMonitoring.getPolicyName());
         assertEquals("/service-role/", rdsMonitoring.getPath());
+
+        IamPolicy apiGatewayLogging = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs");
+        assertEquals("AmazonAPIGatewayPushToCloudWatchLogs", apiGatewayLogging.getPolicyName());
+        assertEquals("/service-role/", apiGatewayLogging.getPath());
     }
 
     @Test

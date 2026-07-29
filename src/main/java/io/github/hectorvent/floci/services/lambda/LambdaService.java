@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import io.github.hectorvent.floci.services.lambda.model.ScalingConfig;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
@@ -40,6 +41,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Business logic for Lambda function management and invocation.
@@ -48,6 +50,12 @@ import java.util.concurrent.ConcurrentHashMap;
 public class LambdaService {
 
     private static final Logger LOG = Logger.getLogger(LambdaService.class);
+    private static final Pattern FILE_SYSTEM_ACCESS_POINT_ARN = Pattern.compile(
+            "^(?:arn:aws[a-zA-Z-]*:elasticfilesystem:[a-z]{2}"
+                    + "(?:(?:-gov)|(?:-iso(?:b)?))?-[a-z]+-\\d:"
+                    + "\\d{12}:access-point/fsap-[a-f0-9]{17}"
+                    + "|arn:aws[-a-z]*:s3files:[0-9a-z-:]+:"
+                    + "file-system/fs-[0-9a-f]{17,40}/access-point/fsap-[0-9a-f]{17,40})$");
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
@@ -327,6 +335,8 @@ public class LambdaService {
             fn.setVpcConfig(vpc);
         }
 
+        fn.setFileSystemConfigs(parseFileSystemConfigs(request.get("FileSystemConfigs")));
+
         // ImageConfig (PackageType=Image overrides)
         if (request.get("ImageConfig") instanceof Map<?, ?> ic) {
             @SuppressWarnings("unchecked")
@@ -535,6 +545,10 @@ public class LambdaService {
                 Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
                 fn.setVpcConfig(vpc);
             }
+        }
+
+        if (request.containsKey("FileSystemConfigs")) {
+            fn.setFileSystemConfigs(parseFileSystemConfigs(request.get("FileSystemConfigs")));
         }
 
         if (request.containsKey("ImageConfig")) {
@@ -941,12 +955,53 @@ public class LambdaService {
         snapshot.setState(fn.getState());
         snapshot.setCodeSizeBytes(fn.getCodeSizeBytes());
         snapshot.setEnvironment(fn.getEnvironment());
+        snapshot.setFileSystemConfigs(new ArrayList<>(fn.getFileSystemConfigs()));
         snapshot.setLastModified(System.currentTimeMillis());
         snapshot.setRevisionId(UUID.randomUUID().toString());
 
         functionStore.save(region, snapshot);
         LOG.infov("Published version {0} for function {1}", version, functionName);
         return snapshot;
+    }
+
+    private static List<LambdaFileSystemConfig> parseFileSystemConfigs(Object value) {
+        if (value == null) {
+            return new ArrayList<>();
+        }
+        if (!(value instanceof List<?> configs)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "FileSystemConfigs must be a list", 400);
+        }
+        if (configs.size() > 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "A Lambda function supports at most one file system configuration", 400);
+        }
+
+        List<LambdaFileSystemConfig> parsed = new ArrayList<>();
+        for (Object valueConfig : configs) {
+            if (!(valueConfig instanceof Map<?, ?> config)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Each FileSystemConfigs entry must be an object", 400);
+            }
+            Object arnValue = config.get("Arn");
+            Object mountPathValue = config.get("LocalMountPath");
+            String arn = arnValue instanceof String string ? string : null;
+            String localMountPath = mountPathValue instanceof String string ? string : null;
+            if (arn == null || arn.isBlank()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "File system Arn is required", 400);
+            }
+            if (!FILE_SYSTEM_ACCESS_POINT_ARN.matcher(arn).matches()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "File system Arn must identify a supported file system access point", 400);
+            }
+            if (localMountPath == null || !localMountPath.matches("^/mnt/[A-Za-z0-9._-]+$")) {
+                throw new AwsException("InvalidParameterValueException",
+                        "LocalMountPath must be a directory directly under /mnt", 400);
+            }
+            parsed.add(new LambdaFileSystemConfig(arn, localMountPath));
+        }
+        return parsed;
     }
 
     public List<LambdaFunction> listVersionsByFunction(String region, String functionName) {

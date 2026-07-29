@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -32,6 +33,7 @@ public class ApiGatewayV2Service {
     private final StorageBackend<String, IntegrationResponse> integrationResponseStore;
     private final StorageBackend<String, Model> modelStore;
     private final StorageBackend<String, VpcLink> vpcLinkStore;
+    private final EmulatorConfig config;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -56,6 +58,7 @@ public class ApiGatewayV2Service {
                 new TypeReference<>() {});
         this.vpcLinkStore = storageFactory.create("apigatewayv2", "apigatewayv2-vpclinks.json",
                 new TypeReference<>() {});
+        this.config = config;
         this.regionResolver = regionResolver;
     }
 
@@ -93,7 +96,7 @@ public class ApiGatewayV2Service {
         if ("WEBSOCKET".equals(protocolType)) {
             api.setApiEndpoint(String.format("wss://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
         } else {
-            api.setApiEndpoint(String.format("https://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
+            api.setApiEndpoint(httpApiEndpoint(api.getApiId()));
         }
 
         @SuppressWarnings("unchecked")
@@ -114,13 +117,17 @@ public class ApiGatewayV2Service {
     }
 
     public Api getApi(String region, String apiId) {
-        return apiStore.get(apiKey(region, apiId))
+        Api api = apiStore.get(apiKey(region, apiId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
+        normalizeApiEndpoint(api);
+        return api;
     }
 
     public List<Api> getApis(String region) {
         String prefix = region + "::";
-        return apiStore.scan(k -> k.startsWith(prefix));
+        List<Api> apis = apiStore.scan(k -> k.startsWith(prefix));
+        apis.forEach(this::normalizeApiEndpoint);
+        return apis;
     }
 
     public void deleteApi(String region, String apiId) {
@@ -172,6 +179,17 @@ public class ApiGatewayV2Service {
 
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    private void normalizeApiEndpoint(Api api) {
+        if ("HTTP".equals(api.getProtocolType())) {
+            api.setApiEndpoint(httpApiEndpoint(api.getApiId()));
+        }
+    }
+
+    private String httpApiEndpoint(String apiId) {
+        return String.format("http://%s.execute-api.%s:%d",
+                apiId, EmbeddedDnsServer.DEFAULT_SUFFIX, config.port());
     }
 
     private static Api.Cors toCors(Map<String, Object> m) {

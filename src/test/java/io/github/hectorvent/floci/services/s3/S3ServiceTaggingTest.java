@@ -35,6 +35,11 @@ class S3ServiceTaggingTest {
     }
 
     @Test
+    void hasQueryParamReturnsTrueForEncodedOperationName() {
+        assertTrue(S3RequestParser.hasQueryParamInString("%75ploads", "uploads"));
+    }
+
+    @Test
     void hasQueryParamReturnsFalseForNullQuery() {
         assertFalse(S3RequestParser.hasQueryParamInString(null, "tagging"));
     }

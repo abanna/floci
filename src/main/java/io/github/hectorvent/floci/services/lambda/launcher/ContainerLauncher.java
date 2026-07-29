@@ -241,6 +241,11 @@ public class ContainerLauncher {
             // enough that a shared volume's helper round-trip would only add cold-start latency.
         }
 
+        if (fn.getFileSystemConfigs() != null) {
+            fn.getFileSystemConfigs().forEach(fileSystem -> specBuilder.withNamedVolume(
+                    efsVolumeName(fileSystem.getArn()), fileSystem.getLocalMountPath(), false));
+        }
+
         // For Image package type use ImageConfig.Command/EntryPoint/WorkingDirectory if set, otherwise fall back to Handler (Zip-style)
         if ("Image".equals(fn.getPackageType())) {
             if (fn.getImageConfigEntryPoint() != null && !fn.getImageConfigEntryPoint().isEmpty()) {
@@ -403,8 +408,11 @@ public class ContainerLauncher {
     // populated and a per-volume lock so a concurrent cold-start storm populates only once. The
     // lock entry is dropped after a successful populate so this map only ever holds in-flight
     // populates (see ensureCodeVolume) rather than growing across redeploys.
+    private static final String CODE_VOLUME_MARKER_DIR = "lambda-codevol-markers";
+    private static final String CODE_VOLUME_MARKER_PREFIX = "floci-code-";
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Object codeVolumeMarkerIoLock = new Object();
 
     /**
      * Returns the name of a read-only Docker volume holding this function's {@code /var/task} code,
@@ -412,7 +420,7 @@ public class ContainerLauncher {
      * throwaway helper container that has the volume mounted read-write; every real container then
      * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
      */
-    private String ensureCodeVolume(LambdaFunction fn, String image) {
+    String ensureCodeVolume(LambdaFunction fn, String image) {
         String volName = codeVolumeName(fn);
         if (populatedCodeVolumes.contains(volName)) {
             return volName;
@@ -422,10 +430,22 @@ public class ContainerLauncher {
             if (populatedCodeVolumes.contains(volName)) {
                 return volName;
             }
+            // Reuse a volume a previous run already populated. The volume name is content-addressed by
+            // the code's sha256, and the completion marker below is written only after a populate fully
+            // succeeds, so a still-present volume with a marker holds exactly this code version — mount
+            // it and skip the (e.g. ~34k-file) re-copy. A crashed or partial populate leaves no marker,
+            // so it is safely redone.
+            if (reusePersistedCodeVolumeOrRemoveStaleMarker(volName)) {
+                LOG.infov("Reusing code volume {0} populated by a previous run (marker present)", volName);
+                populatedCodeVolumes.add(volName);
+                codeVolumeLocks.remove(volName);
+                return volName;
+            }
             long t0 = System.currentTimeMillis();
             LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
                     volName, fn.getFunctionName());
             populateCodeVolume(volName, fn, image);
+            writeCodeVolumeMarkerAndPruneOrphans(volName);
             populatedCodeVolumes.add(volName);
             // Bound codeVolumeLocks: drop the lock now that the volume is populated, so the map only
             // ever holds in-flight populates rather than growing across redeploys. Safe under the
@@ -443,7 +463,7 @@ public class ContainerLauncher {
         return volName;
     }
 
-    private void populateCodeVolume(String volName, LambdaFunction fn, String image) {
+    void populateCodeVolume(String volName, LambdaFunction fn, String image) {
         lifecycleManager.ensureVolume(volName);
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
@@ -466,9 +486,89 @@ public class ContainerLauncher {
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
         } finally {
             if (helperId != null) {
-                try { lifecycleManager.stopAndRemove(helperId, null); } catch (Exception ignore) { /* best effort */ }
+                try {
+                    lifecycleManager.stopAndRemove(helperId, null);
+                } catch (Exception e) {
+                    LOG.warnv("Could not remove code-volume helper {0}: {1}", helperId, e.getMessage());
+                }
             }
             POPULATE_SEMAPHORE.release();
+        }
+    }
+
+    // A code volume survives an emulator restart, but the in-process populatedCodeVolumes set does not.
+    // A persisted completion marker lets a later run recognize an already-populated, content-addressed
+    // volume and skip re-copying its files. The marker is stored under storage.persistent-path
+    // regardless of storage mode; reuse still requires the independently persisted Docker volume.
+    private Path codeVolumeMarkerPath(String volName) {
+        return Path.of(config.storage().persistentPath(), CODE_VOLUME_MARKER_DIR, volName);
+    }
+
+    /**
+     * Reuses a completed volume when both marker and volume exist. If the volume is absent or cannot
+     * be verified, removes the marker before repopulation so a failed copy cannot leave the old
+     * completion signal beside partial data.
+     */
+    private boolean reusePersistedCodeVolumeOrRemoveStaleMarker(String volName) {
+        synchronized (codeVolumeMarkerIoLock) {
+            Path marker = codeVolumeMarkerPath(volName);
+            if (!Files.isRegularFile(marker, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                return false;
+            }
+            java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+            boolean inventoryUnavailable = volumeNames.isEmpty();
+            if (!inventoryUnavailable && volumeNames.get().contains(volName)) {
+                return true;
+            }
+            try {
+                Files.deleteIfExists(marker);
+                if (inventoryUnavailable) {
+                    LOG.warnv("Could not verify backing volume {0}; removed its marker and re-populating",
+                            volName);
+                } else {
+                    LOG.debugv("Removed stale code-volume marker {0}; backing volume is absent", marker);
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException("Could not invalidate code-volume marker " + marker, e);
+            }
+            return false;
+        }
+    }
+
+    private void writeCodeVolumeMarkerAndPruneOrphans(String volName) {
+        synchronized (codeVolumeMarkerIoLock) {
+            Path marker = codeVolumeMarkerPath(volName);
+            try {
+                Files.createDirectories(marker.getParent());
+                Files.writeString(marker, "");
+            } catch (IOException e) {
+                // A missing marker only costs one re-populate on the next boot; never fail a launch over it.
+                LOG.warnv("Could not write code-volume marker {0}: {1}", marker, e.getMessage());
+            }
+            pruneOrphanCodeVolumeMarkers(marker.getParent());
+        }
+    }
+
+    private void pruneOrphanCodeVolumeMarkers(Path markerDir) {
+        java.util.Optional<java.util.Set<String>> volumeNames = lifecycleManager.tryListVolumeNames();
+        if (volumeNames.isEmpty() || !Files.isDirectory(markerDir)) {
+            return;
+        }
+        try (java.util.stream.Stream<Path> markers = Files.list(markerDir)) {
+            markers.filter(path -> Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                    .filter(path -> path.getFileName().toString().startsWith(CODE_VOLUME_MARKER_PREFIX))
+                    .filter(path -> !volumeNames.get().contains(path.getFileName().toString()))
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                            LOG.debugv("Pruned orphan code-volume marker {0}", path);
+                        } catch (IOException e) {
+                            LOG.warnv("Could not prune orphan code-volume marker {0}: {1}",
+                                    path, e.getMessage());
+                        }
+                    });
+        } catch (IOException e) {
+            LOG.warnv("Could not scan code-volume marker directory {0}: {1}", markerDir, e.getMessage());
         }
     }
 
@@ -482,6 +582,15 @@ public class ContainerLauncher {
      * Non-final and package-private so tests can override it (restore it in a finally).
      */
     static long CODE_VOLUME_MIN_BYTES = 32L * 1024 * 1024;
+
+    static String efsVolumeName(String accessPointArn) {
+        int separator = Math.max(accessPointArn.lastIndexOf('/'), accessPointArn.lastIndexOf(':'));
+        String resourceId = separator >= 0 ? accessPointArn.substring(separator + 1) : accessPointArn;
+        if (resourceId.isBlank()) {
+            throw new IllegalArgumentException("EFS access point ARN must include a resource id");
+        }
+        return "floci-efs-" + resourceId;
+    }
 
     /**
      * Returns true iff the total size of files under {@code codeDir} meets or exceeds

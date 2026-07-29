@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudForm
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -22,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -49,7 +51,7 @@ class CloudFormationIamAttachmentProvisionerTest {
                 null, null, null, null, null, null,
                 mapper,
                 null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null,
                 new CloudFormationResourceRegistry(List.of()));
     }
 
@@ -187,6 +189,164 @@ class CloudFormationIamAttachmentProvisionerTest {
         cleanup.verify(iamService).detachRolePolicy("existing-role", policyArn);
         cleanup.verify(iamService).deletePolicy(policyArn);
         verify(iamService, never()).deleteRole("existing-role");
+    }
+
+    @Test
+    void managedPolicyUpdateCreatesNewDefaultVersionInsteadOfRecreatingPolicy() {
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/test-policy";
+        String oldDocument = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}
+                """.trim();
+        String newDocument = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}
+                """.trim();
+        IamPolicy policy = new IamPolicy(
+                "ANPATEST", "test-policy", "/", policyArn, null, oldDocument);
+        PolicyVersion newVersion = new PolicyVersion("v2", newDocument, true);
+        when(iamService.getPolicy(policyArn)).thenReturn(policy);
+        when(iamService.createPolicyVersion(policyArn, newDocument, true)).thenReturn(newVersion);
+
+        StackResource result = provision("ManagedPolicy", "AWS::IAM::ManagedPolicy", """
+                {
+                  "ManagedPolicyName": "test-policy",
+                  "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]
+                  }
+                }
+                """, policyArn, Map.of(
+                        "Arn", policyArn,
+                        "__FlociManagedPolicyDefaultVersion", "v1"));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        assertEquals(policyArn, result.getPhysicalId());
+        assertEquals(policyArn, result.getAttributes().get("Arn"));
+        verify(iamService, never()).createPolicy(anyString(), anyString(), isNull(), anyString(), eq(Map.of()));
+        verify(iamService).createPolicyVersion(policyArn, newDocument, true);
+        verify(iamService).deletePolicyVersion(policyArn, "v1");
+        verify(iamService, never()).listPolicyVersions(policyArn);
+    }
+
+    @Test
+    void managedPolicyNameChangeReplacesPolicyAfterNewAttachmentsSucceed() {
+        String oldArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/old-policy";
+        String newArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/new-policy";
+        IamPolicy oldPolicy = new IamPolicy(
+                "ANPAOLD", "old-policy", "/", oldArn, null, policyDocument());
+        IamPolicy newPolicy = new IamPolicy(
+                "ANPANEW", "new-policy", "/", newArn, null, policyDocument());
+        when(iamService.getPolicy(oldArn)).thenReturn(oldPolicy);
+        when(iamService.createPolicy("new-policy", "/", null, policyDocument(), Map.of()))
+                .thenReturn(newPolicy);
+
+        StackResource result = provision("ManagedPolicy", "AWS::IAM::ManagedPolicy", """
+                {
+                  "ManagedPolicyName": "new-policy",
+                  "PolicyDocument": {"Version":"2012-10-17","Statement":[]},
+                  "Roles": ["retained-role", "new-role"]
+                }
+                """, oldArn, Map.of(
+                        "Arn", oldArn,
+                        "ManagedPolicyRoleTargets", "retained-role",
+                        "__FlociManagedPolicyNameMode", "explicit",
+                        "__FlociManagedPolicyDefaultVersion", "v1"));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        assertEquals(newArn, result.getPhysicalId());
+        assertEquals(newArn, result.getAttributes().get("Arn"));
+        InOrder replacement = inOrder(iamService);
+        replacement.verify(iamService).attachRolePolicy("retained-role", newArn);
+        replacement.verify(iamService).attachRolePolicy("new-role", newArn);
+        replacement.verify(iamService).detachRolePolicy("retained-role", oldArn);
+        replacement.verify(iamService).deletePolicy(oldArn);
+    }
+
+    @Test
+    void managedPolicyReplacementFailureDeletesNewPolicyAndPreservesOldPolicy() {
+        String oldArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/old-policy";
+        String newArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/new-policy";
+        IamPolicy oldPolicy = new IamPolicy(
+                "ANPAOLD", "old-policy", "/", oldArn, null, policyDocument());
+        IamPolicy newPolicy = new IamPolicy(
+                "ANPANEW", "new-policy", "/", newArn, null, policyDocument());
+        when(iamService.getPolicy(oldArn)).thenReturn(oldPolicy);
+        when(iamService.createPolicy("new-policy", "/", null, policyDocument(), Map.of()))
+                .thenReturn(newPolicy);
+        doThrow(new AwsException("NoSuchEntity", "missing role", 404))
+                .when(iamService).attachRolePolicy("missing-role", newArn);
+
+        StackResource result = provision("ManagedPolicy", "AWS::IAM::ManagedPolicy", """
+                {
+                  "ManagedPolicyName": "new-policy",
+                  "PolicyDocument": {"Version":"2012-10-17","Statement":[]},
+                  "Roles": ["retained-role", "missing-role"]
+                }
+                """, oldArn, Map.of(
+                        "Arn", oldArn,
+                        "ManagedPolicyRoleTargets", "retained-role",
+                        "__FlociManagedPolicyNameMode", "explicit",
+                        "__FlociManagedPolicyDefaultVersion", "v1"));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals(oldArn, result.getPhysicalId());
+        InOrder cleanup = inOrder(iamService);
+        cleanup.verify(iamService).detachRolePolicy("retained-role", newArn);
+        cleanup.verify(iamService).deletePolicy(newArn);
+        verify(iamService, never()).detachRolePolicy("retained-role", oldArn);
+        verify(iamService, never()).deletePolicy(oldArn);
+    }
+
+    @Test
+    void managedPolicyVersionLimitFailureDoesNotDeleteExistingVersions() {
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/test-policy";
+        String oldDocument = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}
+                """.trim();
+        String newDocument = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}
+                """.trim();
+        IamPolicy policy = new IamPolicy(
+                "ANPATEST", "test-policy", "/", policyArn, null, oldDocument);
+        when(iamService.getPolicy(policyArn)).thenReturn(policy);
+        when(iamService.createPolicyVersion(policyArn, newDocument, true))
+                .thenThrow(new AwsException("LimitExceeded", "version limit", 409));
+
+        StackResource result = provision("ManagedPolicy", "AWS::IAM::ManagedPolicy", """
+                {
+                  "ManagedPolicyName": "test-policy",
+                  "PolicyDocument": {
+                    "Version":"2012-10-17",
+                    "Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]
+                  }
+                }
+                """, policyArn, Map.of(
+                        "Arn", policyArn,
+                        "__FlociManagedPolicyDefaultVersion", "v1"));
+
+        assertEquals("CREATE_FAILED", result.getStatus());
+        assertEquals("version limit", result.getStatusReason());
+        verify(iamService, never()).deletePolicyVersion(anyString(), anyString());
+        verify(iamService, never()).listPolicyVersions(anyString());
+    }
+
+    @Test
+    void managedPolicyUpdateWithEquivalentDocumentIsIdempotent() {
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/test-policy";
+        IamPolicy policy = new IamPolicy(
+                "ANPATEST", "test-policy", "/", policyArn, null,
+                "{\"Statement\":[],\"Version\":\"2012-10-17\"}");
+        when(iamService.getPolicy(policyArn)).thenReturn(policy);
+
+        StackResource result = provision("ManagedPolicy", "AWS::IAM::ManagedPolicy", """
+                {
+                  "ManagedPolicyName": "test-policy",
+                  "PolicyDocument": {"Version":"2012-10-17","Statement":[]}
+                }
+                """, policyArn, Map.of("Arn", policyArn));
+
+        assertEquals("CREATE_COMPLETE", result.getStatus());
+        verify(iamService, never()).createPolicy(anyString(), anyString(), isNull(), anyString(), eq(Map.of()));
+        verify(iamService, never()).createPolicyVersion(anyString(), anyString(), eq(true));
     }
 
     @Test

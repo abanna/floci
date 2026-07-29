@@ -39,6 +39,7 @@ import software.amazon.awssdk.services.apigatewayv2.model.IntegrationType;
 import software.amazon.awssdk.services.apigatewayv2.model.NotFoundException;
 import software.amazon.awssdk.services.apigatewayv2.model.ProtocolType;
 
+import java.net.URI;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -108,7 +109,11 @@ class ApiGatewayV2ManagementTest {
         assertThat(apiId).isNotBlank();
         assertThat(response.name()).startsWith("http-api-");
         assertThat(response.protocolType()).isEqualTo(ProtocolType.HTTP);
-        assertThat(response.apiEndpoint()).contains(apiId + ".execute-api.us-east-1.amazonaws.com");
+        URI apiEndpoint = URI.create(response.apiEndpoint());
+        assertThat(apiEndpoint.getScheme()).isEqualTo("http");
+        assertThat(apiEndpoint.getHost())
+                .isEqualTo(apiId + ".execute-api.localhost.floci.io");
+        assertThat(apiEndpoint.getPort()).isPositive();
         assertThat(response.createdDate()).isNotNull();
     }
 

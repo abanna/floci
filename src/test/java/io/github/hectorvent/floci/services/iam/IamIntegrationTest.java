@@ -255,6 +255,24 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(18)
+    void getApiGatewayCloudWatchLogsPolicy() {
+        String arn = "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs";
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", arn)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName",
+                    equalTo("AmazonAPIGatewayPushToCloudWatchLogs"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn", equalTo(arn));
+    }
+
+    @Test
     @Order(9)
     void stsGetCallerIdentityFallsBackForUnseededFlociAccessKey() {
         given()

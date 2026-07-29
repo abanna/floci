@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
@@ -27,7 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,11 +53,18 @@ class AslExecutorEcsRunTaskModeTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private EcsService ecsService;
+    private StepFunctionsService stepFunctionsService;
     private AslExecutor executor;
 
     @BeforeEach
     void setUp() {
         ecsService = mock(EcsService.class);
+        stepFunctionsService = mock(StepFunctionsService.class);
+        @SuppressWarnings("unchecked")
+        Instance<StepFunctionsService> stepFunctionsInstance = mock(Instance.class);
+        when(stepFunctionsInstance.isResolvable()).thenReturn(true);
+        when(stepFunctionsInstance.get()).thenReturn(stepFunctionsService);
+        when(stepFunctionsService.isExecutionRunning(anyString())).thenReturn(true);
         // A real handler so parseNetworkConfiguration / parseContainerOverrides actually run.
         EcsJsonHandler ecsJsonHandler = new EcsJsonHandler(ecsService, objectMapper);
 
@@ -71,7 +81,7 @@ class AslExecutorEcsRunTaskModeTest {
                 ecsJsonHandler,
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
-                mock(Instance.class),
+                stepFunctionsInstance,
                 mock(EmulatorConfig.class),
                 null);
     }
@@ -134,6 +144,23 @@ class AslExecutorEcsRunTaskModeTest {
         assertEquals(List.of("subnet-123"), passed.getAwsvpcConfiguration().getSubnets());
         assertEquals(List.of("sg-abc"), passed.getAwsvpcConfiguration().getSecurityGroups());
         assertEquals("ENABLED", passed.getAwsvpcConfiguration().getAssignPublicIp());
+    }
+
+    @Test
+    void syncPollingStopsWhenParentExecutionIsCancelled() {
+        EcsTask runningTask = new EcsTask();
+        runningTask.setTaskArn("arn:aws:ecs:%s:%s:task/test".formatted(REGION, ACCOUNT));
+        runningTask.setLastStatus("RUNNING");
+        when(ecsService.runTask(any(), any(), anyInt(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(List.of(runningTask));
+        when(stepFunctionsService.isExecutionRunning(anyString()))
+                .thenReturn(true, true, false);
+
+        Execution execution = run("arn:aws:states:::ecs:runTask.sync",
+                "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("RUNNING", execution.getStatus());
+        verify(ecsService, never()).describeTasks(any(), any(), any());
     }
 
     private Execution run(String resource, String input) {

@@ -280,6 +280,7 @@ public interface EmulatorConfig {
         TaggingStorageConfig tagging();
         ElasticBeanstalkStorageConfig elasticbeanstalk();
         CloudTrailStorageConfig cloudtrail();
+        RumStorageConfig rum();
     }
 
     interface SsmStorageConfig {
@@ -488,6 +489,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface RumStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface CodeDeployStorageConfig {
         Optional<String> mode();
 
@@ -569,6 +577,7 @@ public interface EmulatorConfig {
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
         PricingServiceConfig pricing();
+        VerifiedPermissionsServiceConfig verifiedpermissions();
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
         CostExplorerServiceConfig ce();
@@ -585,6 +594,7 @@ public interface EmulatorConfig {
         S3VectorsServiceConfig s3vectors();
         IotServiceConfig iot();
         IotDataServiceConfig iotdata();
+        RumServiceConfig rum();
     }
 
     interface IotServiceConfig {
@@ -609,6 +619,11 @@ public interface EmulatorConfig {
     }
 
     interface IotDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface RumServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1169,6 +1184,11 @@ public interface EmulatorConfig {
         Optional<String> snapshotPath();
     }
 
+    interface VerifiedPermissionsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface TranscribeServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1217,6 +1237,12 @@ public interface EmulatorConfig {
 
         @WithDefault("cloudfront.net")
         String domainSuffix();
+
+        /**
+         * Exact custom-origin hostnames allowed to resolve to private or otherwise non-routable
+         * addresses. Empty by default to match CloudFront's public custom-origin boundary.
+         */
+        Optional<List<String>> allowedPrivateOriginHosts();
     }
 
     interface AppSyncServiceConfig {
@@ -1285,6 +1311,12 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean tlsEnabled();
+
+        /**
+         * Optional registry endpoint advertised by GetAuthorizationToken.
+         * Use this when clients run in containers and cannot reach the default localhost endpoint.
+         */
+        Optional<String> proxyEndpoint();
 
         @WithDefault("true")
         boolean keepRunningOnShutdown();

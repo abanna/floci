@@ -80,10 +80,7 @@ class LambdaReactiveSyncIntegrationTest {
         // 1. Upload V2 to same bucket/key
         given().body(makeZip("v2")).when().put("/" + BUCKET + "/" + KEY).then().statusCode(200);
 
-        // 2. Wait a bit for async event processing and Docker copy
-        Thread.sleep(5000);
-
-        // 3. Invoke again. Should see V2 without calling UpdateFunctionCode
+        // 2. Invoke immediately. The internal code-sync event completes before the S3 PUT returns.
         given()
             .body("{}")
         .when()

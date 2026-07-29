@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -126,6 +127,46 @@ class PipesTargetInvokerTest {
         ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
         verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0), eq(region));
         assertEquals("{\"data\": {\"key\":\"value\"}}", captor.getValue());
+    }
+
+    @Test
+    void inputTemplate_mapsSqsBatchAndParsesJsonBodyForStepFunctions() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.put("InputTemplate", """
+                {
+                  "rawMessage": <$.body>,
+                  "sqs": {
+                    "attributes": <$.attributes>,
+                    "messageAttributes": <$.messageAttributes>,
+                    "messageId": <$.messageId>,
+                    "receiptHandle": <$.receiptHandle>
+                  }
+                }
+                """);
+        Pipe pipe = createPipe(
+                "arn:aws:states:us-east-1:000000000000:stateMachine:cdk-workflow", tp);
+        String payload = """
+                [{
+                  "body": "{\\"systemId\\":\\"SYSTEM\\",\\"solutionId\\":\\"DATA\\"}",
+                  "attributes": {"ApproximateReceiveCount":"1"},
+                  "messageAttributes": {},
+                  "messageId": "message-1",
+                  "receiptHandle": "receipt-1"
+                }]
+                """;
+
+        invoker.invoke(pipe, payload, "us-east-1");
+
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(stepFunctionsService).startExecution(
+                eq("arn:aws:states:us-east-1:000000000000:stateMachine:cdk-workflow"),
+                anyString(), captor.capture(), eq("us-east-1"));
+        JsonNode transformed = assertDoesNotThrow(() -> MAPPER.readTree(captor.getValue()));
+        assertEquals("SYSTEM", transformed.path(0).path("rawMessage").path("systemId").asText());
+        assertEquals("DATA", transformed.path(0).path("rawMessage").path("solutionId").asText());
+        assertEquals("message-1", transformed.path(0).path("sqs").path("messageId").asText());
+        assertEquals("1", transformed.path(0).path("sqs").path("attributes")
+                .path("ApproximateReceiveCount").asText());
     }
 
     // ──────────────────────────── applyInputTemplate unit ────────────────────────────

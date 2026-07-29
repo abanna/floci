@@ -488,35 +488,15 @@ public class S3Controller {
                 return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
             }
 
-            // --- Website Hosting Redirection Logic ---
-            if (isWebsiteRequest(httpHeaders) && (uriInfo.getQueryParameters().isEmpty() || (uriInfo.getQueryParameters().size() == 1 && hasQueryParam(uriInfo, "list-type")))) {
-                try {
-                    WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
-                    if (webConfig.getIndexDocument() != null) {
-                        try {
-                            s3Service.authorizeGetObject(bucket, webConfig.getIndexDocument(), null, authorization);
-                            S3Object indexObj = s3Service.getObject(bucket, webConfig.getIndexDocument());
-                            return Response.ok(indexObj.getData())
-                                    .type(indexObj.getContentType())
-                                    .header("Content-Length", indexObj.getSize())
-                                    .header("ETag", indexObj.getETag())
-                                    .header("x-amz-website-redirect-location", "index")
-                                    .build();
-                        } catch (AwsException e) {
-                            if (!isWebsiteErrorDocumentTrigger(e)) {
-                                throw e;
-                            }
-                            Response r = serveErrorDocument(bucket, webConfig, authorization, e.getHttpStatus());
-                            if (r != null) {
-                                return r;
-                            }
-                        }
-                    }
-                } catch (AwsException e) {
-                    if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
-                        throw e;
-                    }
-                    // Bucket is not a website, continue to listObjects
+            // --- S3 static-website index resolution (site root) ---
+            // A website endpoint has no S3 REST API, so it serves the index document for the site root
+            // regardless of any query string — e.g. a single-page-app OAuth callback GET
+            // /?code=...&state=... must return index.html, not a ListObjects response. (?list-type and
+            // other sub-resource queries only reach the REST endpoint, never a website host.)
+            if (isWebsiteRequest(httpHeaders)) {
+                Response website = serveWebsiteObject(bucket, "", authorization);
+                if (website != null) {
+                    return website;
                 }
             }
 
@@ -736,6 +716,13 @@ public class S3Controller {
             key = extractObjectKey(uriInfo, bucket);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+
+            if (isWebsiteRequest(httpHeaders)) {
+                Response website = serveWebsiteObject(bucket, key, authorization);
+                if (website != null) {
+                    return website;
+                }
+            }
 
             if (uploadId != null) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListMultipartUploadParts", authorization);
@@ -1115,8 +1102,22 @@ public class S3Controller {
                                       @HeaderParam("Content-Type") String contentType,
                                       @Context UriInfo uriInfo,
                                       byte[] body) {
+        return handleBucketPost(
+                bucket, contentType, hasQueryParam(uriInfo, "delete"), body);
+    }
+
+    /** Runs the public S3 bucket-POST protocol path for an in-process origin request. */
+    public Response handleForwardedBucketPost(String bucket, String contentType,
+                                              String rawQuery, byte[] body) {
+        return handleBucketPost(
+                bucket, contentType,
+                S3RequestParser.hasQueryParamInString(rawQuery, "delete"), body);
+    }
+
+    private Response handleBucketPost(String bucket, String contentType,
+                                      boolean deleteRequest, byte[] body) {
         try {
-            if (hasQueryParam(uriInfo, "delete")) {
+            if (deleteRequest) {
                 return handleDeleteObjects(bucket, body);
             }
             if (contentType != null && contentType.startsWith("multipart/form-data")) {
@@ -1142,10 +1143,88 @@ public class S3Controller {
                                          @Context HttpHeaders httpHeaders,
                                          @Context UriInfo uriInfo,
                                          byte[] body) {
-        try {
-            key = extractObjectKey(uriInfo, bucket);
+        key = extractObjectKey(uriInfo, bucket);
+        String baseUrl = uriInfo.getBaseUri().toString();
+        if (!baseUrl.endsWith("/")) {
+            baseUrl += "/";
+        }
+        return handleObjectPost(
+                bucket, key, uploadId, versionId, contentType, ifMatch, ifNoneMatch,
+                httpHeaders, uriInfo, body,
+                hasQueryParam(uriInfo, "uploads"),
+                hasQueryParam(uriInfo, "restore"),
+                hasQueryParam(uriInfo, "select"),
+                false,
+                baseUrl + bucket + "/");
+    }
 
-            if (hasQueryParam(uriInfo, "uploads")) {
+    /**
+     * Runs the same S3 object-POST protocol path for an in-process origin request.
+     *
+     * <p>CloudFront uses this entrypoint after it has resolved the S3 origin bucket and decoded
+     * object key. Keeping the operation here ensures multipart, restore, select, validation, and
+     * AWS REST-XML response behavior cannot drift from the public S3 endpoint.
+     */
+    public Response handleForwardedObjectPost(String bucket, String key,
+                                              String uploadId, String versionId,
+                                              String contentType, String ifMatch,
+                                              String ifNoneMatch, HttpHeaders httpHeaders,
+                                              UriInfo uriInfo, String rawQuery,
+                                              byte[] body, String locationPrefix) {
+        return handleObjectPost(
+                bucket, key, uploadId, versionId, contentType, ifMatch, ifNoneMatch,
+                httpHeaders, uriInfo, body,
+                S3RequestParser.hasQueryParamInString(rawQuery, "uploads"),
+                S3RequestParser.hasQueryParamInString(rawQuery, "restore"),
+                S3RequestParser.hasQueryParamInString(rawQuery, "select"),
+                true,
+                locationPrefix);
+    }
+
+    @PATCH
+    @Path("/{bucket}")
+    @Produces(MediaType.APPLICATION_XML)
+    public Response handleBucketPatch(@PathParam("bucket") String bucket) {
+        return handleUnsupportedMethod(bucket);
+    }
+
+    @PATCH
+    @Path("/{bucket}/{key:.+}")
+    @Produces(MediaType.APPLICATION_XML)
+    public Response handleObjectPatch(@PathParam("bucket") String bucket,
+                                      @PathParam("key") String key) {
+        return handleUnsupportedMethod(bucket);
+    }
+
+    /**
+     * Returns the S3 data-plane response for a method that S3 does not implement for this resource.
+     * CloudFront calls the same handler only after its own allowed-method check, so this is an origin
+     * response rather than a CloudFront viewer-method rejection.
+     */
+    private Response handleUnsupportedMethod(String bucket) {
+        try {
+            s3Service.headBucket(bucket);
+            return xmlErrorResponse(new AwsException(
+                    "MethodNotAllowed",
+                    "The specified method is not allowed against this resource.",
+                    405));
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response handleObjectPost(String bucket, String key,
+                                      String uploadId, String versionId,
+                                      String contentType, String ifMatch,
+                                      String ifNoneMatch, HttpHeaders httpHeaders,
+                                      UriInfo uriInfo, byte[] body,
+                                      boolean uploadsRequest,
+                                      boolean restoreRequest,
+                                      boolean selectRequest,
+                                      boolean anonymousOrigin,
+                                      String locationPrefix) {
+        try {
+            if (uploadsRequest) {
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
                         extractUserMetadata(httpHeaders),
                         httpHeaders.getHeaderString("x-amz-storage-class"),
@@ -1164,19 +1243,22 @@ public class S3Controller {
                         .elem("UploadId", upload.getUploadId())
                         .end("InitiateMultipartUploadResult")
                         .build();
-                Response.ResponseBuilder response = Response.ok(xml);
+                Response.ResponseBuilder response = Response.ok(xml)
+                        .type(MediaType.APPLICATION_XML);
                 appendSseCustomerHeaders(response, upload);
                 return response.build();
             }
 
-            if (hasQueryParam(uriInfo, "restore")) {
+            if (restoreRequest) {
                 s3Service.restoreObject(bucket, key, versionId, new String(body, StandardCharsets.UTF_8));
                 return Response.accepted().build();
             }
 
-            if (hasQueryParam(uriInfo, "select")) {
-                S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
-                        s3Service.isAuthEnforced(), httpHeaders, uriInfo);
+            if (selectRequest) {
+                S3Service.RequestAuthorization authorization = anonymousOrigin
+                        ? S3Service.RequestAuthorization.unsigned()
+                        : S3RequestAuthorizationParser.parseIfRequired(
+                                s3Service.isAuthEnforced(), httpHeaders, uriInfo);
                 s3Service.authorizeGetObject(bucket, key, versionId, authorization);
                 S3Object obj = s3Service.getObject(bucket, key, versionId);
                 byte[] result = s3SelectService.select(obj, new String(body, StandardCharsets.UTF_8));
@@ -1192,14 +1274,10 @@ public class S3Controller {
                     return preconditionResponse;
                 }
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers);
-                String baseUrl = uriInfo.getBaseUri().toString();
-                if (baseUrl.endsWith("/")) {
-                    baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
-                }
                 XmlBuilder xmlBuilder = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("CompleteMultipartUploadResult", AwsNamespaces.S3)
-                        .elem("Location", baseUrl + "/" + bucket + "/" + key)
+                        .elem("Location", locationPrefix + key)
                         .elem("Bucket", bucket)
                         .elem("Key", key)
                         .elem("ETag", obj.getETag());
@@ -1207,7 +1285,7 @@ public class S3Controller {
                     xmlBuilder.elem("VersionId", obj.getVersionId());
                 }
                 String xml = xmlBuilder.end("CompleteMultipartUploadResult").build();
-                var resp = Response.ok(xml);
+                var resp = Response.ok(xml).type(MediaType.APPLICATION_XML);
                 if (obj.getVersionId() != null) {
                     resp.header("x-amz-version-id", obj.getVersionId());
                 }
@@ -2186,6 +2264,76 @@ public class S3Controller {
     private static boolean isWebsiteRequest(HttpHeaders httpHeaders) {
         String host = httpHeaders.getHeaderString("Host");
         return host != null && host.contains("s3-website");
+    }
+
+    /**
+     * Applies S3 static-website index-document resolution to a website-endpoint GET, mirroring how the
+     * real {@code <bucket>.s3-website-<region>.amazonaws.com} endpoint serves a site:
+     * <ul>
+     *   <li>a "directory" request (the site root, or any key ending in {@code /}) serves the index
+     *       document for that prefix — e.g. {@code /docs/} serves {@code docs/index.html};</li>
+     *   <li>a non-slash path that is not itself an object but has an index document underneath it is a
+     *       folder, so it 302-redirects to the slash-terminated form (so the page's relative asset URLs
+     *       resolve against the right base);</li>
+     *   <li>a missing index document falls back to the configured error document.</li>
+     * </ul>
+     * Returns {@code null} when the request should be served by the normal object path — i.e. an exact
+     * object hit, or a bucket that has no website configuration at all. The index read is authorized
+     * (a no-op unless S3 auth enforcement is enabled), matching the object-serving path.
+     */
+    private Response serveWebsiteObject(String bucket, String key,
+                                        S3Service.RequestAuthorization authorization) {
+        WebsiteConfiguration cfg;
+        try {
+            cfg = s3Service.getBucketWebsite(bucket);
+        } catch (AwsException e) {
+            // Only "no website configuration" means fall through to normal handling; a real error
+            // (e.g. NoSuchBucket) must propagate rather than be masked as "not a website".
+            if (!"NoSuchWebsiteConfiguration".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return null;
+        }
+        String index = cfg.getIndexDocument();
+        if (index == null) {
+            return null;
+        }
+        // The routing layer strips a trailing slash from the object key, so recover the "directory"
+        // intent from the raw request path: a trailing slash (or the site root) means "serve this
+        // prefix's index document"; the prefix is the key without any trailing slash.
+        var request = currentVertxRequest.getCurrent().request();
+        String rawPath = request.path();
+        boolean directory = key.isEmpty() || rawPath.endsWith("/");
+        String prefix = key.endsWith("/") ? key.substring(0, key.length() - 1) : key;
+
+        if (directory) {
+            String indexKey = prefix.isEmpty() ? index : prefix + "/" + index;
+            try {
+                s3Service.authorizeGetObject(bucket, indexKey, null, authorization);
+                S3Object indexObj = s3Service.headObject(bucket, indexKey, null);
+                // A website endpoint serves the index document with no response-header overrides and no
+                // checksum headers (no viewer sends response-* or x-amz-checksum-mode to a website endpoint).
+                return fullObjectResponse(bucket, indexKey, null, indexObj,
+                        new ResponseHeaderOverrides(null, null, null, null, null, null), false);
+            } catch (AwsException e) {
+                if (!isWebsiteErrorDocumentTrigger(e)) {
+                    throw e;
+                }
+                Response err = serveErrorDocument(bucket, cfg, authorization, e.getHttpStatus());
+                return err != null ? err : xmlErrorResponse(e);
+            }
+        }
+        // Not slash-terminated: an exact object is served by the normal path; a prefix that exists only
+        // as a "folder" (an index document lives beneath it) 302-redirects to the slash-terminated form
+        // so the page's relative asset URLs resolve against the right base (matching real S3).
+        if (!s3Service.objectExists(bucket, prefix) && s3Service.objectExists(bucket, prefix + "/" + index)) {
+            String query = request.query();
+            String location = rawPath + "/" + (query == null ? "" : "?" + query);
+            return Response.status(Response.Status.FOUND)
+                    .header("Location", location)
+                    .build();
+        }
+        return null;
     }
 
     private Response serveErrorDocument(String bucket, WebsiteConfiguration cfg,

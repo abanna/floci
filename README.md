@@ -221,7 +221,7 @@ Floci supports local emulation for application services, data services, eventing
 |---|---|
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, KMS, Secrets Manager, SSM |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
-| API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
+| API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, Verified Permissions, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, Lightsail, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Elastic Beanstalk, ELB v2 |
 | Data, analytics, and AI | Athena, Glue, EMR, Firehose, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
@@ -249,6 +249,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | AppSync | In-process | GraphQL API management API, schema registry, AWS scalars, domain names, channel namespaces |
 | IAM | In-process | Users, roles, groups, policies, instance profiles, access keys; STS AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
 | Cognito | In-process | User pools, app clients, auth flows, JWKS and OpenID well-known endpoints |
+| Verified Permissions | In-process local fixture | `IsAuthorized` for the explicit `local-policy-store` development sentinel |
 | KMS | In-process | Encrypt, decrypt, sign, verify, data keys, aliases |
 | Kinesis | In-process | Streams, shards, enhanced fan-out, split and merge |
 | Secrets Manager | In-process | Versioning, resource policies, tagging |

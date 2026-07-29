@@ -219,6 +219,21 @@ public class PipesPoller implements Resettable {
                     }
                 }
             }
+        } else if (isStepFunctionsTarget(pipe)) {
+            String eventJson = bareArray(filtered);
+            boolean delivered = invokeWithDlq(pipe, eventJson, region);
+            if (delivered) {
+                for (Message msg : messages) {
+                    if (matchedMessageIds.contains(msg.getMessageId())) {
+                        try {
+                            sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
+                        } catch (Exception e) {
+                            LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
+                                    pipe.getName(), msg.getMessageId(), e.getMessage());
+                        }
+                    }
+                }
+            }
         } else {
             Map<String, Message> messagesById = new HashMap<>();
             for (Message msg : messages) {
@@ -509,6 +524,9 @@ public class PipesPoller implements Resettable {
         if (isLambdaTarget(pipe)) {
             return invokeWithDlq(pipe, wrapRecords(records), region) ? 0 : records.size();
         }
+        if (isStepFunctionsTarget(pipe)) {
+            return invokeWithDlq(pipe, bareArray(records), region) ? 0 : records.size();
+        }
         int failed = 0;
         for (JsonNode record : records) {
             if (!invokeWithDlq(pipe, record.toString(), region)) {
@@ -546,10 +564,10 @@ public class PipesPoller implements Resettable {
         try {
             String enriched = targetInvoker.applyEnrichment(pipe, eventsArray, region);
             if (enriched != null) {
-                // Only a Lambda target expects the batch (JSON array) shape; a Step Functions, SQS,
-                // SNS or EventBridge target must receive the raw enrichment response, matching the
-                // non-enrichment delivery path. Array-wrapping those would corrupt their input.
-                String targetPayload = isLambdaTarget(pipe)
+                // Lambda and Step Functions have no batch API, so AWS Pipes sends the full batch
+                // as a JSON array even when the batch size is one. Other target types consume the
+                // enrichment response directly through their service-specific APIs.
+                String targetPayload = receivesFullBatchPayload(pipe)
                         ? asEventArray(objectMapper, enriched)
                         : enriched;
                 targetInvoker.invoke(pipe, targetPayload, region);
@@ -779,6 +797,14 @@ public class PipesPoller implements Resettable {
     private static boolean isLambdaTarget(Pipe pipe) {
         String targetArn = pipe.getTarget();
         return targetArn.contains(":lambda:") || targetArn.contains(":function:");
+    }
+
+    private static boolean isStepFunctionsTarget(Pipe pipe) {
+        return pipe.getTarget().contains(":states:");
+    }
+
+    private static boolean receivesFullBatchPayload(Pipe pipe) {
+        return isLambdaTarget(pipe) || isStepFunctionsTarget(pipe);
     }
 
     private static boolean isKafkaSource(String sourceArn) {

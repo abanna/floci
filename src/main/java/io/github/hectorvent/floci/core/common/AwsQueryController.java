@@ -82,7 +82,7 @@ public class AwsQueryController {
             "CreateGroup", "GetGroup", "DeleteGroup", "ListGroups",
             "AddUserToGroup", "RemoveUserFromGroup", "ListGroupsForUser",
             "CreateRole", "GetRole", "DeleteRole", "ListRoles", "UpdateRole",
-            "CreatePolicy", "GetPolicy", "DeletePolicy", "ListPolicies",
+            "CreatePolicy", "GetPolicy", "DeletePolicy", "ListPolicies", "ListEntitiesForPolicy",
             "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion",
             "ListPolicyVersions", "SetDefaultPolicyVersion",
             "AttachUserPolicy", "DetachUserPolicy", "ListAttachedUserPolicies",
@@ -367,7 +367,10 @@ public class AwsQueryController {
             "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
-            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters"
+            "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters",
+            "DescribeDBProxies", "CreateDBProxy", "ModifyDBProxy", "DeleteDBProxy",
+            "RegisterDBProxyTargets", "DeregisterDBProxyTargets",
+            "DescribeDBProxyTargetGroups", "ModifyDBProxyTargetGroup", "DescribeDBProxyTargets"
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(

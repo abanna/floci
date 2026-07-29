@@ -10,6 +10,7 @@ import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -33,6 +34,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -49,9 +51,10 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -343,6 +346,8 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
         assertEquals(TEST_CONTAINER_ID, instance.getDockerContainerId());
+        verify(harness.dockerClient).removeContainerCmd(TEST_CONTAINER_ID);
+        verify(harness.portAllocator).release(2201);
         verify(harness.metadataServer, never()).registerContainer(anyString(), anyString(), any());
     }
 
@@ -370,6 +375,75 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
     }
 
+    @Test
+    void terminateDuringLaunchCleansUpBeforeReleasingSshPort() throws Exception {
+        LaunchHarness harness = launchHarness();
+        CountDownLatch createStarted = new CountDownLatch(1);
+        CountDownLatch allowCreate = new CountDownLatch(1);
+        when(harness.lifecycleManager.create(any(ContainerSpec.class))).thenAnswer(invocation -> {
+            createStarted.countDown();
+            assertTrue(allowCreate.await(2, TimeUnit.SECONDS));
+            return TEST_CONTAINER_ID;
+        });
+        Instance instance = instance("i-cancel-launch");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        assertTrue(createStarted.await(2, TimeUnit.SECONDS));
+        harness.manager.terminate(instance);
+        verify(harness.portAllocator, after(100).never()).release(2201);
+
+        allowCreate.countDown();
+
+        verify(harness.dockerClient, timeout(2000)).removeContainerCmd(TEST_CONTAINER_ID);
+        verify(harness.lifecycleManager, never())
+                .startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class));
+        verify(harness.portAllocator, timeout(2000)).release(2201);
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void launchStartFailureRemovesContainerAndReleasesSshPort() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.lifecycleManager.startCreated(
+                eq(TEST_CONTAINER_ID), any(ContainerSpec.class)))
+                .thenThrow(new IllegalStateException("start failed"));
+        Instance instance = instance("i-start-failure");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        verify(harness.dockerClient, timeout(2000)).removeContainerCmd(TEST_CONTAINER_ID);
+        verify(harness.portAllocator, timeout(2000)).release(2201);
+        verify(harness.metadataServer, never()).registerContainer(anyString(), anyString(), any());
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void launchPublishesAppPortsOnlyAfterInstanceIsRunning() throws Exception {
+        LaunchHarness harness = launchHarness();
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = inspectResponse("172.18.0.12");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        Instance instance = instance("i-app-ports");
+        Set<Integer> appPorts = Set.of(8080);
+        doAnswer(invocation -> {
+            assertEquals("running", instance.getState().getName());
+            return null;
+        }).when(harness.portForwardManager).reconcile(instance, appPorts);
+
+        harness.manager.launch(
+                instance,
+                ResolvedAmiImage.minimal("ubuntu:24.04"),
+                null,
+                "us-west-2",
+                appPorts);
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.portForwardManager, timeout(2000)).reconcile(instance, appPorts);
+    }
+
     private static LaunchHarness launchHarness() {
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(RETURNS_SELF));
@@ -395,8 +469,12 @@ class Ec2ContainerManagerTest {
         when(ec2.imdsPort()).thenReturn(9169);
 
         DockerClient dockerClient = mock(DockerClient.class);
+        RemoveContainerCmd removeContainer = mock(
+                RemoveContainerCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        when(dockerClient.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(removeContainer);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
         Ec2ContainerManager manager = new Ec2ContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -407,8 +485,16 @@ class Ec2ContainerManagerTest {
                 portAllocator,
                 config,
                 metadataServer,
-                mock(Ec2PortForwardManager.class));
-        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder);
+                portForwardManager);
+        return new LaunchHarness(
+                manager,
+                lifecycleManager,
+                dockerClient,
+                portAllocator,
+                metadataServer,
+                logStreamer,
+                portForwardManager,
+                builder);
     }
 
     private static Instance instance(String instanceId) {
@@ -440,9 +526,12 @@ class Ec2ContainerManagerTest {
     }
 
     private record LaunchHarness(Ec2ContainerManager manager,
+                                 ContainerLifecycleManager lifecycleManager,
                                  DockerClient dockerClient,
+                                 PortAllocator portAllocator,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
+                                 Ec2PortForwardManager portForwardManager,
                                  ContainerBuilder.Builder builder) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();

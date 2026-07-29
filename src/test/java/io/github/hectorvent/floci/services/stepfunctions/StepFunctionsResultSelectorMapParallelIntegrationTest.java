@@ -13,7 +13,8 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * ResultSelector is not Task-only in AWS: it also transforms the raw result of Map and Parallel
  * states before ResultPath merges it back into the state input. These tests also exercise the
- * AWS bracket wildcard form ({@code $[*].field}) inside the selector.
+ * AWS bracket wildcard form ({@code $[*].field}) inside the selector and the JSONPath Map input
+ * processing order.
  */
 @QuarkusTest
 class StepFunctionsResultSelectorMapParallelIntegrationTest {
@@ -29,6 +30,13 @@ class StepFunctionsResultSelectorMapParallelIntegrationTest {
                 "End":true}}}
             """;
 
+    private static final String MAP_INPUT_PATH_DEFINITION = """
+            {"StartAt":"M","States":{
+              "M":{"Type":"Map","InputPath":"$.selected","ItemsPath":"$.people",
+                "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                "End":true}}}
+            """;
+
     private static final String PARALLEL_DEFINITION = """
             {"StartAt":"P","States":{
               "P":{"Type":"Parallel",
@@ -37,6 +45,17 @@ class StepFunctionsResultSelectorMapParallelIntegrationTest {
                   {"StartAt":"B","States":{"B":{"Type":"Pass","Result":{"v":2},"End":true}}}],
                 "ResultSelector":{"values.$":"$[*].v"},
                 "End":true}}}
+            """;
+
+    private static final String PARALLEL_CATCH_DEFINITION = """
+            {"StartAt":"P","States":{
+              "P":{"Type":"Parallel",
+                "Branches":[
+                  {"StartAt":"FailBranch","States":{
+                    "FailBranch":{"Type":"Fail","Error":"BranchFailure","Cause":"boom"}}}],
+                "Catch":[{"ErrorEquals":["States.ALL"],"ResultPath":"$.failure","Next":"Recovered"}],
+                "End":true},
+              "Recovered":{"Type":"Pass","Result":{"caught":true},"End":true}}}
             """;
 
     @BeforeAll
@@ -51,8 +70,26 @@ class StepFunctionsResultSelectorMapParallelIntegrationTest {
     }
 
     @Test
+    void mapAppliesInputPathBeforeItemsPath() throws Exception {
+        assertEquals("[{\"name\":\"selected-a\"},{\"name\":\"selected-b\"}]",
+                run(MAP_INPUT_PATH_DEFINITION, """
+                        {
+                          "people":[{"name":"unfiltered"}],
+                          "selected":{
+                            "people":[{"name":"selected-a"},{"name":"selected-b"}]
+                          }
+                        }
+                        """));
+    }
+
+    @Test
     void parallelResultSelectorCollectsFieldFromEachBranch() throws Exception {
         assertEquals("{\"values\":[1,2]}", run(PARALLEL_DEFINITION, "{}"));
+    }
+
+    @Test
+    void parallelBranchFailureUsesParallelCatch() throws Exception {
+        assertEquals("{\"caught\":true}", run(PARALLEL_CATCH_DEFINITION, "{}"));
     }
 
     private String run(String definition, String input) throws InterruptedException {

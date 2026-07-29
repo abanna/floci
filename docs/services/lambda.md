@@ -254,6 +254,10 @@ No extra configuration or `cap_add` is needed — Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
 
+The same local DNS path is used for
+[API Gateway v2 HTTP API endpoints](api-gateway.md#http-api-data-plane), keeping
+generated CloudFormation/CDK outputs directly callable from Lambda containers.
+
 !!! note "Resolving public hostnames from Lambda"
     A Lambda whose handler reaches a public host (`fetch()`/HTTPS to e.g.
     `business-api.tiktok.com`) resolves it through Floci's embedded DNS. As a

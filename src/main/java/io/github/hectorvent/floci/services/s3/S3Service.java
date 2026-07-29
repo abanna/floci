@@ -489,21 +489,49 @@ public class S3Service implements Resettable {
         authorizeObjectRead(bucketName, key, versionId, action, authorization);
     }
 
+    public void authorizeAnonymousGetObject(String bucketName, String key) {
+        authorizeGetObject(bucketName, key, null, RequestAuthorization.unsigned());
+    }
+
+    public void authorizeAnonymousPutObject(String bucketName, String key) {
+        authorizeObjectAction(
+                bucketName, key, "s3:PutObject", RequestAuthorization.unsigned());
+    }
+
+    public void authorizeAnonymousDeleteObject(String bucketName, String key) {
+        authorizeObjectAction(
+                bucketName, key, "s3:DeleteObject", RequestAuthorization.unsigned());
+    }
+
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
         String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketName);
-        authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
+        authorizeS3Action(bucketName, null, null, action, bucketArn, authorization);
     }
 
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
+        authorizeObjectAction(bucketName, key, versionId, action, authorization);
+    }
+
+    private void authorizeObjectAction(
+            String bucketName, String key, String action,
+            RequestAuthorization authorization) {
+        authorizeObjectAction(bucketName, key, null, action, authorization);
+    }
+
+    private void authorizeObjectAction(
+            String bucketName, String key, String versionId, String action,
+            RequestAuthorization authorization) {
         String objectArn = S3PublicAccessEvaluator.objectArn(bucketName, key);
-        authorizeS3Read(bucketName, key, versionId, action, objectArn, authorization);
+        authorizeS3Action(bucketName, key, versionId, action, objectArn, authorization);
     }
 
     boolean isAuthEnforced() {
         return enforceAuth;
     }
 
-    private void authorizeS3Read(String bucketName, String key, String versionId, String action, String resourceArn, RequestAuthorization authorization) {
+    private void authorizeS3Action(String bucketName, String key, String versionId,
+                                   String action, String resourceArn,
+                                   RequestAuthorization authorization) {
         if (!enforceAuth) {
             return;
         }
@@ -637,6 +665,22 @@ public class S3Service implements Resettable {
 
     public S3Object headObject(String bucketName, String key, String versionId) {
         return getObjectMetadata(bucketName, key, versionId);
+    }
+
+    /** Returns true when the (latest-version) object exists, without throwing on a miss. */
+    public boolean objectExists(String bucketName, String key) {
+        try {
+            getObjectMetadata(bucketName, key, null);
+            return true;
+        } catch (AwsException e) {
+            // Only a genuine miss means "does not exist"; surface any other storage error (e.g.
+            // NoSuchBucket) instead of masking it as absent, which would let callers act on a wrong
+            // answer (e.g. issue a website redirect that hides the real failure).
+            if ("NoSuchKey".equals(e.getErrorCode()) || "NoSuchVersion".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
+        }
     }
 
     public InputStream openObjectStream(String bucketName, String key, String versionId) {

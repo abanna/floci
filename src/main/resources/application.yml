@@ -136,6 +136,8 @@ floci:
         # mode: memory
       appsync:
         flush-interval-ms: 5000
+      rum:
+        flush-interval-ms: 5000
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -353,6 +355,8 @@ floci:
       registry-max-port: 5199
       data-path: ./data/ecr
       tls-enabled: false
+      # Optional endpoint returned by GetAuthorizationToken when clients cannot reach localhost.
+      # proxy-endpoint: http://host.docker.internal:5100
       keep-running-on-shutdown: true
       uri-style: hostname
     ui:
@@ -405,6 +409,8 @@ floci:
       enabled: true
     pricing:
       enabled: true
+    verifiedpermissions:
+      enabled: true
     transcribe:
       enabled: true
     ce:
@@ -424,6 +430,7 @@ floci:
       enabled: true
     cloudfront:
       enabled: true
+      allowed-private-origin-hosts: []
     appsync:
       enabled: true
       schema-worker-threads: 4
@@ -438,4 +445,6 @@ floci:
         host: 0.0.0.0
         port: 1883
     iotdata:
+      enabled: true
+    rum:
       enabled: true

@@ -36,6 +36,11 @@ public class DbCluster {
 
     private String dockerVolumeName;
     private String volumeId;
+    private String containerStorageResourceId;
+
+    // Aurora Serverless v2 scaling (ACUs). Null when the cluster is not Serverless v2.
+    private Double serverlessV2MinCapacity;
+    private Double serverlessV2MaxCapacity;
 
     // Transient — not persisted
     private transient String containerId;
@@ -143,6 +148,11 @@ public class DbCluster {
     public String getVolumeId() { return volumeId; }
     public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
 
+    public String getContainerStorageResourceId() { return containerStorageResourceId; }
+    public void setContainerStorageResourceId(String containerStorageResourceId) {
+        this.containerStorageResourceId = containerStorageResourceId;
+    }
+
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }
 
@@ -151,4 +161,10 @@ public class DbCluster {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public Double getServerlessV2MinCapacity() { return serverlessV2MinCapacity; }
+    public void setServerlessV2MinCapacity(Double serverlessV2MinCapacity) { this.serverlessV2MinCapacity = serverlessV2MinCapacity; }
+
+    public Double getServerlessV2MaxCapacity() { return serverlessV2MaxCapacity; }
+    public void setServerlessV2MaxCapacity(Double serverlessV2MaxCapacity) { this.serverlessV2MaxCapacity = serverlessV2MaxCapacity; }
 }

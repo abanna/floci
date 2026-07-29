@@ -72,6 +72,7 @@ Floci emulates 68 AWS services. See the [Services Overview](services/index.md) f
 | Textract | JSON 1.1 |
 | Transcribe | JSON 1.1 |
 | Pricing | JSON 1.1 |
+| Verified Permissions | JSON 1.0 |
 | Cost Explorer | JSON 1.1 |
 | Cost and Usage Reports | JSON 1.1 |
 | BCM Data Exports | JSON 1.1 |

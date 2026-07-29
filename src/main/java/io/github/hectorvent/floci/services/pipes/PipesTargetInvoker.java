@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.pipes;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -212,6 +213,28 @@ public class PipesTargetInvoker {
     }
 
     String applyInputTemplate(String template, String payload) {
+        try {
+            JsonNode payloadNode = objectMapper.readTree(payload);
+            if (payloadNode.isArray()) {
+                ArrayNode transformedBatch = objectMapper.createArrayNode();
+                for (JsonNode event : payloadNode) {
+                    String transformed = applyInputTemplateToEvent(template, event.toString());
+                    try {
+                        transformedBatch.add(objectMapper.readTree(transformed));
+                    } catch (Exception e) {
+                        transformedBatch.add(transformed);
+                    }
+                }
+                return transformedBatch.toString();
+            }
+        } catch (Exception e) {
+            LOG.debugv("Pipe input was not JSON; applying InputTemplate to the raw payload: {0}",
+                    e.getMessage());
+        }
+        return applyInputTemplateToEvent(template, payload);
+    }
+
+    private String applyInputTemplateToEvent(String template, String payload) {
         Matcher m = TEMPLATE_PLACEHOLDER.matcher(template);
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
@@ -262,6 +285,17 @@ public class PipesTargetInvoker {
                 }
                 if (current.isMissingNode() || current.isNull()) {
                     return null;
+                }
+            }
+            if (current.isTextual()) {
+                try {
+                    JsonNode parsed = objectMapper.readTree(current.asText());
+                    if (parsed.isObject() || parsed.isArray()) {
+                        current = parsed;
+                    }
+                } catch (Exception e) {
+                    LOG.debugv("Pipe JSONPath {0} resolved to a plain string; preserving it: {1}",
+                            jsonPath, e.getMessage());
                 }
             }
             if (current.isValueNode()) {

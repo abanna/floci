@@ -64,6 +64,14 @@ class AslExecutorIntrinsicContextTest {
     }
 
     @Test
+    void bracketQuotedMembersSupportNamesOutsideDotShorthand() throws Exception {
+        JsonNode root = mapper.readTree("{\"config\":{\"max-limit\":2},\"a.b\":3}");
+
+        assertEquals(2, newExecutor().resolvePath("$['config']['max-limit']", root).asInt());
+        assertEquals(3, newExecutor().resolvePath("$['a.b']", root).asInt());
+    }
+
+    @Test
     void wholeContext_resolvesInsideIntrinsic() {
         AslExecutor executor = newExecutor();
         JsonNode input = mapper.createObjectNode();

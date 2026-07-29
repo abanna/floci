@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.s3;
 
 import jakarta.ws.rs.core.UriInfo;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import org.jboss.logging.Logger;
 
 /**
  * Package-private utility for parsing S3 request elements.
@@ -11,14 +14,16 @@ import jakarta.ws.rs.core.UriInfo;
  */
 final class S3RequestParser {
 
+    private static final Logger LOG = Logger.getLogger(S3RequestParser.class);
+
     private S3RequestParser() {
     }
 
     /**
      * Returns {@code true} if the request URI contains a query parameter with the given name.
      * Checks {@link UriInfo#getQueryParameters()} first; if that does not contain the param,
-     * falls back to parsing the raw query string by splitting on {@code &} and extracting
-     * the parameter name (everything before the first {@code =}).
+     * falls back to parsing the raw query string by splitting on {@code &}, extracting
+     * the parameter name (everything before the first {@code =}), and URL-decoding that name.
      *
      * <p>This avoids false positives from substring matches inside parameter <em>values</em>
      * (e.g. {@code X-Amz-SignedHeaders=host%3Bx-amz-tagging} would falsely match
@@ -39,6 +44,13 @@ final class S3RequestParser {
         for (String pair : query.split("&")) {
             int eq = pair.indexOf('=');
             String name = eq >= 0 ? pair.substring(0, eq) : pair;
+            try {
+                name = URLDecoder.decode(name, StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                LOG.debugv("Ignoring malformed S3 query parameter name {0}: {1}",
+                        name, e.getMessage());
+                continue;
+            }
             if (name.equals(param)) return true;
         }
         return false;

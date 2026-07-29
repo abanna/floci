@@ -368,7 +368,7 @@ class ApiGatewayV2WebSocketIntegrationTest {
                 .body("apiId", notNullValue())
                 .body("name", equalTo("http-compat-api"))
                 .body("protocolType", equalTo("HTTP"))
-                .body("apiEndpoint", startsWith("https://"))
+                .body("apiEndpoint", startsWith("http://"))
                 // AWS defaults must be populated even when not provided
                 .body("routeSelectionExpression", equalTo("${request.method} ${request.path}"))
                 .body("apiKeySelectionExpression", equalTo("$request.header.x-api-key"))

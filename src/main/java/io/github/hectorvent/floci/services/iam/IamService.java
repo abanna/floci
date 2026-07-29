@@ -488,13 +488,36 @@ public class IamService implements SessionAccountLookup {
 
     public void deletePolicy(String policyArn) {
         rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
-        if (policy.getAttachmentCount() > 0) {
+        getPolicy(policyArn);
+        PolicyEntities entities = listEntitiesForPolicy(policyArn);
+        if (!entities.roles().isEmpty() || !entities.users().isEmpty() || !entities.groups().isEmpty()) {
             throw new AwsException("DeleteConflict",
                     "Cannot delete a policy attached to entities. Detach it first.", 409);
         }
         policies.delete(policyArn);
         LOG.infov("Deleted IAM policy: {0}", policyArn);
+    }
+
+    /** The roles, users and groups a managed policy is currently attached to. */
+    public record PolicyEntities(List<IamRole> roles, List<IamUser> users, List<IamGroup> groups) {}
+
+    /**
+     * Lists the entities (roles, users, groups) a managed policy is attached to — the read behind
+     * IAM's ListEntitiesForPolicy and what a caller must detach before {@link #deletePolicy} will
+     * succeed. Attachments are tracked on the principals, so this scans them for the given ARN.
+     */
+    public PolicyEntities listEntitiesForPolicy(String policyArn) {
+        getPolicy(policyArn); // AWS raises NoSuchEntity for an unknown policy ARN; fail fast likewise.
+        List<IamRole> attachedRoles = roles.scan(k -> true).stream()
+                .filter(r -> r.getAttachedPolicyArns().contains(policyArn))
+                .toList();
+        List<IamUser> attachedUsers = users.scan(k -> true).stream()
+                .filter(u -> u.getAttachedPolicyArns().contains(policyArn))
+                .toList();
+        List<IamGroup> attachedGroups = groups.scan(k -> true).stream()
+                .filter(g -> g.getAttachedPolicyArns().contains(policyArn))
+                .toList();
+        return new PolicyEntities(attachedRoles, attachedUsers, attachedGroups);
     }
 
     public List<IamPolicy> listPolicies(String scope, String pathPrefix) {
@@ -538,11 +561,15 @@ public class IamService implements SessionAccountLookup {
         Map<String, PolicyVersion> versions = policy.getVersions();
         PolicyVersion version;
         synchronized (versions) {
-            int nextVersionNum = versions.size() + 1;
-            if (nextVersionNum > 5) {
+            if (versions.size() >= 5) {
                 throw new AwsException("LimitExceeded",
                         "A managed policy can have up to 5 versions.", 409);
             }
+            int nextVersionNum = versions.keySet().stream()
+                    .filter(versionId -> versionId != null && versionId.matches("v\\d+"))
+                    .mapToInt(versionId -> Integer.parseInt(versionId.substring(1)))
+                    .max()
+                    .orElse(0) + 1;
             String versionId = "v" + nextVersionNum;
             version = new PolicyVersion(versionId, document, setAsDefault);
             if (setAsDefault) {

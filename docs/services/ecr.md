@@ -31,7 +31,7 @@
 
 - **Real OCI registry backing.** A single shared `registry:2` container per Floci instance serves all repositories. The container is started lazily on the first ECR API call and reused across Floci restarts (`keep-running-on-shutdown: true` by default), so pushed image bytes survive restarts.
 - **Loopback URI scheme.** Repository URIs follow `<account>.dkr.ecr.<region>.localhost:<registryPort>/<repoName>`. RFC 6761 reserves `*.localhost` to resolve to the loopback address, and the docker daemon auto-trusts loopback as an insecure registry, so **no daemon configuration changes are required** — `docker push` and `docker pull` work out of the box. A `path` URI style fallback (`localhost:<port>/<account>/<region>/<repo>`) is available via `floci.services.ecr.uri-style: path` for environments where `*.localhost` resolution misbehaves.
-- **Authorization.** `GetAuthorizationToken` returns `Base64("AWS:floci")` plus a proxy endpoint. The backing `registry:2` runs without auth, so any `aws ecr get-login-password | docker login` succeeds.
+- **Authorization.** `GetAuthorizationToken` returns `Base64("AWS:floci")` plus a proxy endpoint. The backing `registry:2` runs without auth, so any `aws ecr get-login-password | docker login` succeeds. The advertised endpoint defaults to `localhost:<registryPort>` and can be overridden for containerized clients.
 - **Manifest format negotiation.** `BatchGetImage` forwards the caller's `acceptedMediaTypes` as the upstream `Accept` header. Modern OCI manifests (`application/vnd.oci.image.manifest.v1+json`) and Docker v2 schema 2 are both supported.
 - **Cross-account / cross-region isolation.** Internally the registry namespaces repositories as `<account>/<region>/<repoName>`, so the same repository name in different accounts or regions cannot collide.
 - **Reconcile on first start.** When the registry container starts, Floci queries `GET /v2/_catalog` and recreates `Repository` metadata entries for any namespaces present in the registry but missing from local storage. This means image bytes are never orphaned across restarts.
@@ -47,6 +47,7 @@
 | `FLOCI_SERVICES_ECR_REGISTRY_BASE_PORT` | `5100` | First port in the registry port range |
 | `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last port in the registry port range |
 | `FLOCI_SERVICES_ECR_DATA_PATH` | `./data/ecr` | Bind-mount root for the registry data directory |
+| `FLOCI_SERVICES_ECR_PROXY_ENDPOINT` | _(none)_ | Override the endpoint returned by `GetAuthorizationToken`; for example, `http://host.docker.internal:5100` when both CLI and Lambda clients run in containers |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Leave the registry container running so the next Floci start adopts it |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | `hostname` = `*.dkr.ecr.<region>.localhost`; `path` = `localhost:<port>/<account>/<region>/<repo>` |
 | `FLOCI_SERVICES_ECR_TLS_ENABLED` | `false` | Reserved for future ACM-backed TLS |

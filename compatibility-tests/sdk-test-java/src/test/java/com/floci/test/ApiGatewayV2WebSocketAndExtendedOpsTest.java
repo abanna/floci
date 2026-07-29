@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.apigatewayv2.model.*;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Map;
 
@@ -65,7 +66,11 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
 
         assertThat(httpApiId).isNotBlank();
         assertThat(res.protocolType()).isEqualTo(ProtocolType.HTTP);
-        assertThat(res.apiEndpoint()).contains("https://");
+        URI apiEndpoint = URI.create(res.apiEndpoint());
+        assertThat(apiEndpoint.getScheme()).isEqualTo("http");
+        assertThat(apiEndpoint.getHost())
+                .isEqualTo(httpApiId + ".execute-api.localhost.floci.io");
+        assertThat(apiEndpoint.getPort()).isPositive();
         assertThat(res.routeSelectionExpression()).isEqualTo("${request.method} ${request.path}");
         assertThat(res.apiKeySelectionExpression()).isEqualTo("$request.header.x-api-key");
         assertThat(res.createdDate()).isNotNull();

@@ -58,6 +58,8 @@ final class AwsManagedPolicies {
                 "Provides full access to Lambda, S3, DynamoDB, CloudWatch Metrics and Logs."),
         new ManagedPolicyDef("AWSCloudFormationFullAccess", "/",
                 "Provides full access to AWS CloudFormation."),
+        new ManagedPolicyDef("AWSCloudFormationReadOnlyAccess", "/",
+                "Provides read-only access to AWS CloudFormation."),
         new ManagedPolicyDef("AWSXRayDaemonWriteAccess", "/",
                 "Allows write permissions to the AWS X-Ray daemon."),
         new ManagedPolicyDef("AmazonElasticFileSystemClientFullAccess", "/",
@@ -82,6 +84,8 @@ final class AwsManagedPolicies {
                 "Provides receive message, delete message, and read attribute access to SQS queues, and write permissions to CloudWatch Logs."),
         new ManagedPolicyDef("AWSLambdaVPCAccessExecutionRole", "/service-role/",
                 "Provides minimum permissions for a Lambda function to execute while accessing a resource within a VPC."),
+        new ManagedPolicyDef("AmazonAPIGatewayPushToCloudWatchLogs", "/service-role/",
+                "Provides API Gateway permission to push logs to CloudWatch Logs."),
 
         // ECS / EKS execution role policies
         new ManagedPolicyDef("AmazonECSTaskExecutionRolePolicy", "/service-role/",

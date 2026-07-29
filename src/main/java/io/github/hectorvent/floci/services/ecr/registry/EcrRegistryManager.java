@@ -95,6 +95,15 @@ public class EcrRegistryManager {
 
     /** Returns the proxy endpoint a docker daemon should log into for any ECR repo. */
     public String getProxyEndpoint() {
+        var configuredEndpoint = config.services().ecr().proxyEndpoint()
+                .map(String::trim)
+                .filter(endpoint -> !endpoint.isEmpty())
+                .map(endpoint -> endpoint.endsWith("/")
+                        ? endpoint.substring(0, endpoint.length() - 1)
+                        : endpoint);
+        if (configuredEndpoint.isPresent()) {
+            return configuredEndpoint.get();
+        }
         String scheme = config.services().ecr().tlsEnabled() ? "https" : "http";
         return scheme + "://localhost:" + effectivePort();
     }

@@ -203,10 +203,114 @@ class StepFunctionsSqsIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     void cleanup_deleteQueues() {
         deleteQueue(queueUrl);
         deleteQueue(callbackQueueUrl);
+    }
+
+    @Test
+    @Order(7)
+    void heartbeatExtendsWaitForTaskTokenDeadline() throws Exception {
+        String definition = """
+                {
+                    "StartAt": "WaitTask",
+                    "States": {
+                        "WaitTask": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+                            "HeartbeatSeconds": 1,
+                            "TimeoutSeconds": 5,
+                            "Parameters": {
+                                "QueueUrl": "%s",
+                                "MessageBody": {"task_token.$": "$$.Task.Token"}
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """.formatted(callbackQueueUrl);
+        String smArn = createStateMachine(
+                "heartbeat-wait-token-" + System.currentTimeMillis(), definition);
+        String execArn = startExecution(smArn, "{}");
+
+        JsonNode message = receiveSingleMessage(callbackQueueUrl);
+        String taskToken = mapper.readTree(message.path("Body").asText())
+                .path("task_token").asText();
+        assertFalse(taskToken.isBlank());
+
+        sendTaskHeartbeat(taskToken);
+        Thread.sleep(700);
+        sendTaskHeartbeat(taskToken);
+        Thread.sleep(700);
+        sendTaskSuccess(taskToken, "{\"heartbeatExtended\":true}");
+
+        JsonNode output = mapper.readTree(waitForExecution(execArn));
+        assertTrue(output.path("heartbeatExtended").asBoolean());
+        deleteMessage(callbackQueueUrl, message.path("ReceiptHandle").asText());
+    }
+
+    @Test
+    @Order(8)
+    void stopExecutionClosesPendingTaskToken() throws Exception {
+        String definition = """
+                {
+                    "StartAt": "WaitTask",
+                    "States": {
+                        "WaitTask": {
+                            "Type": "Task",
+                            "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+                            "Parameters": {
+                                "QueueUrl": "%s",
+                                "MessageBody": {"task_token.$": "$$.Task.Token"}
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """.formatted(callbackQueueUrl);
+        String smArn = createStateMachine(
+                "stopped-wait-token-" + System.currentTimeMillis(), definition);
+        String execArn = startExecution(smArn, "{}");
+
+        JsonNode message = receiveSingleMessage(callbackQueueUrl);
+        String taskToken = mapper.readTree(message.path("Body").asText())
+                .path("task_token").asText();
+        assertFalse(taskToken.isBlank());
+
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.StopExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("{\"executionArn\":" + quote(execArn) + "}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.SendTaskSuccess")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("{\"taskToken\":" + quote(taskToken) + ",\"output\":\"{}\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("TaskTimedOut"));
+
+        assertEquals("ABORTED", describeExecution(execArn).jsonPath().getString("status"));
+        Response history = given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("{\"executionArn\":" + quote(execArn) + "}")
+            .when()
+                .post("/");
+        history.then().statusCode(200);
+        java.util.List<String> eventTypes = history.jsonPath().getList("events.type");
+        assertTrue(eventTypes.contains("ExecutionAborted"));
+        assertFalse(eventTypes.contains("ExecutionSucceeded"));
+        assertFalse(eventTypes.contains("ExecutionFailed"));
+
+        deleteMessage(callbackQueueUrl, message.path("ReceiptHandle").asText());
     }
 
     private static String createQueue(String queueName) {
@@ -335,6 +439,17 @@ class StepFunctionsSqsIntegrationTest {
                 .when()
                 .post("/")
                 .then()
+                .statusCode(200);
+    }
+
+    private void sendTaskHeartbeat(String taskToken) {
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.SendTaskHeartbeat")
+                .contentType(SFN_CONTENT_TYPE)
+                .body("{\"taskToken\":" + quote(taskToken) + "}")
+            .when()
+                .post("/")
+            .then()
                 .statusCode(200);
     }
 

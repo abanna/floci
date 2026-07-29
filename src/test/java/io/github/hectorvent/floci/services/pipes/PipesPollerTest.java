@@ -89,9 +89,9 @@ class PipesPollerTest {
     }
 
     @Test
-    void pollSqs_enrichmentToNonLambdaTargetForwardsRawResponse() throws Exception {
-        // A non-Lambda target (here Step Functions) must receive the raw enrichment response, not a
-        // one-element batch array — array-wrapping would start the execution with [{...}] instead of {...}.
+    void pollSqs_enrichmentToStepFunctionsTargetWrapsResponseInBatchArray() throws Exception {
+        // Step Functions has no batch API, so AWS Pipes sends the full batch as a JSON array even
+        // when the source batch size and enrichment response contain only one event.
         Pipe pipe = new Pipe();
         pipe.setName("enrich-sfn");
         pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
@@ -111,9 +111,9 @@ class PipesPollerTest {
         ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
         verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
         JsonNode delivered = MAPPER.readTree(payload.getValue());
-        assertFalse(delivered.isArray(),
-                "non-Lambda target must receive the raw enrichment response, not a batch array");
-        assertEquals("S1", delivered.path("systemId").asText());
+        assertTrue(delivered.isArray(), "Step Functions target must receive the batch array shape");
+        assertEquals(1, delivered.size());
+        assertEquals("S1", delivered.get(0).path("systemId").asText());
     }
 
     @Test
@@ -142,6 +142,54 @@ class PipesPollerTest {
         assertTrue(delivered.isArray(), "Lambda target must receive the batch array shape");
         assertEquals(1, delivered.size());
         assertEquals("S1", delivered.get(0).path("systemId").asText());
+    }
+
+    @Test
+    void pollSqs_enrichmentToSqsTargetForwardsRawResponse() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("enrich-sqs");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setEnrichment("arn:aws:lambda:us-east-1:000000000000:function:enrich");
+        pipe.setTarget("arn:aws:sqs:us-east-1:000000000000:target-queue");
+
+        Message msg = new Message("{\"orderId\":\"o1\"}");
+        msg.setMessageId("m1");
+        msg.setReceiptHandle("rh1");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(msg));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn("{\"systemId\":\"S1\"}");
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode delivered = MAPPER.readTree(payload.getValue());
+        assertFalse(delivered.isArray(), "SQS target must receive the raw enrichment response");
+        assertEquals("S1", delivered.path("systemId").asText());
+    }
+
+    @Test
+    void pollSqs_directToStepFunctionsTargetForwardsBatchArray() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("direct-sfn");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setTarget("arn:aws:states:us-east-1:000000000000:stateMachine:tgt");
+
+        Message msg = new Message("{\"orderId\":\"o1\"}");
+        msg.setMessageId("m1");
+        msg.setReceiptHandle("rh1");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(msg));
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        JsonNode delivered = MAPPER.readTree(payload.getValue());
+        assertTrue(delivered.isArray(), "Step Functions target must receive the source batch array");
+        assertEquals(1, delivered.size());
+        assertEquals("m1", delivered.get(0).path("messageId").asText());
     }
 
     @Test
